@@ -1,0 +1,41 @@
+name: anonNet Node
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hardened Setup
+        run: |
+          sudo systemctl stop systemd-journald.service
+          sudo rm -rf /var/log/*
+          sudo apt-get update && sudo apt-get install -y wireguard
+          S_PRIV=$(wg genkey)
+          S_PUB=$(echo "$S_PRIV" | wg pubkey)
+          IP=$(curl -s https://ifconfig.me)
+          cat <<EOF | sudo tee /etc/wireguard/wg0.conf
+          [Interface]
+          PrivateKey = $S_PRIV
+          Address = 10.0.0.1/24
+          ListenPort = 51820
+          PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+          EOF
+          sudo wg-quick up wg0
+          echo "$IP:51820,$S_PUB" > registry.txt
+          git config user.name "anonnet-bot"
+          git config user.email "bot@anonnet.io"
+          git add registry.txt
+          git commit -m "Rotate" || exit 0
+          git push
+      - name: Scrambler
+        run: |
+          while true; do
+            head -c $((1 + RANDOM % 10)) /dev/urandom | nc -u -w1 10.0.0.2 51820 || true
+            sleep $((1 + RANDOM % 5))
+          done &
+          sleep 21000
