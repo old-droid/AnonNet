@@ -21,25 +21,43 @@ jobs:
           sudo sysctl -w net.core.default_qdisc=fq
           sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
           sudo sysctl -w net.ipv4.ip_forward=1
+          sudo sysctl -w net.ipv4.conf.all.accept_source_route=0
 
           # 3. Identity & Setup
-          sudo apt-get update && sudo apt-get install -y wireguard
+          sudo apt-get update && sudo apt-get install -y wireguard iptables-persistent
           S_PRIV=$(wg genkey)
           S_PUB=$(echo "$S_PRIV" | wg pubkey)
           IP=$(curl -s https://ifconfig.me)
 
-          # 4. WireGuard Config (Port 443 + MTU 1280)
+          # 4. WireGuard Config
           cat <<EOF | sudo tee /etc/wireguard/wg0.conf
           [Interface]
           PrivateKey = $S_PRIV
           Address = 10.0.0.1/24
           ListenPort = 443
           MTU = 1280
-          PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
           EOF
+          
           sudo wg-quick up wg0
 
-          # 5. Push to Public Registry
+          # 5. Firewall Rules (CRITICAL)
+          sudo iptables -F
+          sudo iptables -X
+          sudo iptables -P INPUT ACCEPT
+          sudo iptables -P FORWARD ACCEPT
+          sudo iptables -P OUTPUT ACCEPT
+          
+          # Allow WireGuard traffic
+          sudo iptables -A INPUT -i wg0 -j ACCEPT
+          sudo iptables -A INPUT -p udp --dport 443 -j ACCEPT
+          
+          # Forward and NAT
+          sudo iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
+          sudo iptables -A FORWARD -i eth0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+          sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+          sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+          # 6. Push to Registry
           echo "$IP:443,$S_PUB" > registry.txt
           git config user.name "anonnet-bot"
           git config user.email "bot@anonnet.io"
@@ -47,11 +65,5 @@ jobs:
           git commit -m "Turbo Rotate [skip ci]" || exit 0
           git push
 
-      - name: Scrambler & Keep-Alive
-        run: |
-          while true; do
-            # Send noise to client IP (10.0.0.2)
-            head -c $((1 + RANDOM % 10)) /dev/urandom | nc -u -w1 10.0.0.2 443 || true
-            sleep $((1 + RANDOM % 5))
-          done &
-          sleep 21000
+      - name: Keep-Alive
+        run: sleep 21000
